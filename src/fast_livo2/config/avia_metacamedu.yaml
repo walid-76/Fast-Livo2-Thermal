@@ -1,0 +1,103 @@
+
+/**:
+  ros__parameters:
+    common:
+      img_topic: "/camera/left/jpeg"    # CHANGE THIS to your thermal topic: "/thermal/stabilized_8bit"
+      lid_topic: "/livox/lidar"         # LiDAR topic from livox_ros_driver2
+      imu_topic: "/livox/imu"           # IMU topic from livox_ros_driver2
+      img_en: 1                         # 1 = enable camera | 0 = LiDAR+IMU only (no visual)
+      lidar_en: 1                       # 1 = enable LiDAR
+      ros_driver_bug_fix: false         # workaround for timestamp bugs in some driver versions
+      enable_image_processing: true     # true = run full LiDAR+IMU+Camera | false = LiDAR+IMU only
+
+    extrin_calib:
+      # ── CRITICAL: these must match your physical sensor mounting ──────────
+      # Wrong values here = broken/drifting map
+      # Use Kalibr to calibrate when hardware arrives
+      extrinsic_T: [0.011, 0.02329, -0.04412]       # translation: camera position relative to LiDAR (x, y, z in meters)
+      extrinsic_R: [1., 0., 0., 0., 1., 0., 0., 0., 1.]  # rotation matrix camera→LiDAR (identity = perfectly aligned)
+      Rcl: [0.8459084992484703, -0.4535552772229826, 0.28058228989439776,   # rotation FROM camera TO LiDAR
+            0.3274101197085882, 0.026335829096533758, -0.9445152394843643,   # 3x3 matrix written row by row
+            0.4210005040514897, 0.8908389498719628, 0.17077628927755173]
+      Pcl: [0.022648260370124056, -0.09188984649611615, -0.03436178897905727]  # translation FROM camera TO LiDAR (meters)
+
+    time_offset:
+      # If sensors have clock drift between them, tune these
+      # Start at 0.0 and adjust if the map looks twisted or distorted
+      imu_time_offset: 0.0    # shift IMU timestamps by N seconds
+      img_time_offset: 0.0    # shift camera timestamps by N seconds
+      exposure_time_init: 0.0 # initial guess for camera exposure time (0 = auto)
+
+    preprocess:
+      point_filter_num: 1      # keep 1 out of every N points (1=all, 2=half, 4=quarter)
+      filter_size_surf: 0.001  # voxel downsampling size before processing (meters)
+      lidar_type: 7            # 7 = Livox MID-360 ← correct for your sensor
+      scan_line: 4             # number of scan lines (MID-360 specific)
+      blind: 0.5               # ignore points closer than 0.5m (removes self-hits on the robot body)
+
+    vio:
+      # Visual Inertial Odometry — how the camera refines the pose estimate
+      max_iterations: 5           # how many times to refine visual estimate per frame (more = slower but better)
+      outlier_threshold: 1000     # reject visual features with photometric error above this value
+      img_point_cov: 100          # how much to trust visual measurements (higher = less trust in camera)
+      patch_size: 8               # size of image patch tracked per feature (8 = 8x8 pixels)
+      patch_pyrimid_level: 4      # image pyramid levels for multi-scale tracking (handles fast motion)
+      normal_en: true             # use surface normals to improve patch-to-map alignment
+      raycast_en: false           # raycasting for occlusion handling — accurate but expensive, keep false
+      inverse_composition_en: false  # alternative tracking formulation, usually false
+      exposure_estimate_en: true  # auto-estimate camera exposure — IMPORTANT for thermal cameras
+                                  # thermal brightness shifts with scene temperature, this compensates
+      inv_expo_cov: 0.1           # how aggressively to update exposure estimate (lower = more stable)
+
+    imu:
+      imu_en: true        # use IMU for state propagation between LiDAR scans
+      imu_int_frame: 30   # number of IMU measurements to integrate per LiDAR scan
+      # Noise values — get exact numbers from your IMU datasheet for best performance
+      acc_cov: 0.8        # accelerometer white noise (higher = less trust in IMU acceleration)
+      gyr_cov: 0.5        # gyroscope white noise (higher = less trust in IMU rotation rate)
+      b_acc_cov: 0.001    # accelerometer bias random walk (how fast bias drifts)
+      b_gyr_cov: 0.001    # gyroscope bias random walk (how fast bias drifts)
+
+    lio:
+      # LiDAR Inertial Odometry — point cloud to map alignment (ICP)
+      max_iterations: 5         # ICP iterations per scan (more = slower but more accurate)
+      dept_err: 0.02            # LiDAR depth measurement error in meters
+      beam_err: 0.15            # LiDAR beam angle error in radians
+      min_eigen_value: 0.005    # minimum eigenvalue to accept a plane as valid for alignment
+      voxel_size: 0.5           # map voxel size in meters (0.5 = 50cm cubes)
+                                # smaller = more detailed map but more CPU/memory
+      max_layer: 2              # voxel octree depth (more layers = finer resolution)
+      max_points_num: 50        # max points stored per voxel before discarding oldest
+      layer_init_num: [5, 5, 5, 5, 5]  # min points needed to initialize each octree layer
+
+    local_map:
+      map_sliding_en: false    # false = keep full map in memory (fine for short runs)
+                               # true = sliding window map, use for long runs to save memory
+      half_map_size: 100       # if sliding enabled: keep 100m radius around the robot
+      sliding_thresh: 8.0      # slide the map when robot moves more than 8m from map center
+
+    uav:
+      imu_rate_odom: false      # false = publish odometry at LiDAR rate (~10Hz)
+                                # true = publish at IMU rate (~200Hz, for UAV control loops)
+      gravity_align_en: true    # align initial orientation with gravity vector on startup
+
+    publish:
+      dense_map_en: true           # true = publish full dense point cloud to /cloud_registered
+      pub_effect_point_en: true   # publish points used for LIO alignment (debug only)
+      pub_plane_en: true          # publish detected planes (debug only)
+      pub_scan_num: 1              # publish every N scans (1 = every scan, 2 = every other)
+      blind_rgb_points: 0.0        # ignore colored points closer than this distance (meters)
+
+    evo:
+      # Trajectory evaluation — used with the evo tool to measure accuracy against ground truth
+      seq_name: "CBD_Building_01"  # name used in output trajectory files
+      pose_output_en: false        # true = save trajectory to file for evo evaluation
+
+    pcd_save:
+      # Point cloud map saving to disk
+      pcd_save_en: true         # true = save final map as .pcd file (open in CloudCompare)
+      colmap_output_en: true    # true = export images+poses for COLMAP 3D mesh generation
+                                 # requires interval: -1
+      filter_size_pcd: 0.15      # downsample saved map to 15cm resolution (keeps file size small)
+      interval: -1               # -1 = save all frames in ONE file at the end
+                                 # N = save a new file every N LiDAR frames

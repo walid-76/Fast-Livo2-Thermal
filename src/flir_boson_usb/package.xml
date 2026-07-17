@@ -1,0 +1,30 @@
+<?xml version="1.0"?>
+<package format="3">
+  <name>flir_boson_usb</name>
+  <version>2.0.0</version>
+  <description>FLIR Boson USB camera driver for ROS2</description>
+
+  <maintainer email="hursah@mail.uni-paderborn.de">Hürkan Sahin</maintainer>
+  <license>MIT</license>
+
+  <!-- ROS2 build system -->
+  <buildtool_depend>ament_cmake</buildtool_depend>
+
+  <depend>rclcpp</depend>
+  <depend>sensor_msgs</depend>
+  <depend>cv_bridge</depend>
+  <depend>camera_info_manager</depend>
+  <depend>opencv</depend>
+
+  <test_depend>ament_lint_auto</test_depend>
+  <test_depend>ament_lint_common</test_depend>
+  
+  <exec_depend>python3</exec_depend>
+  <exec_depend>python3-numpy</exec_depend>
+  <exec_depend>python3-serial</exec_depend>
+
+  <export>
+    <build_type>ament_cmake</build_type>
+  </export>
+</package>
+

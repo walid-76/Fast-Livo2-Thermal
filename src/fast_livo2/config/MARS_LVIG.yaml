@@ -1,0 +1,253 @@
+/**:
+  ros__parameters:
+    common:
+      img_topic: "/left_camera/image"   # CHANGE TO "/thermal/stabilized_8bit" for your Flir Boson
+      lid_topic: "/livox/lidar"         # LiDAR topic published by livox_ros_driver2
+      imu_topic: "/livox/imu"           # IMU topic published by livox_ros_driver2
+      img_en: 1                         # 1 = enable camera | 0 = run LiDAR+IMU only (no visual)
+      lidar_en: 1                       # 1 = enable LiDAR (always keep 1)
+      ros_driver_bug_fix: false         # true = apply timestamp fix for buggy Livox driver versions
+                                        # keep false unless you see timestamp-related errors
+
+    extrin_calib:
+      # ── Physical mounting transform between LiDAR and Camera ──────────────
+      # CRITICAL: these values are specific to HOW the sensors are physically mounted
+      # You MUST re-calibrate these with Kalibr when you mount your Flir Boson + MID-360
+      # Wrong values = map will drift and look twisted
+
+      extrinsic_T: [0.04165, 0.02326, -0.0284]           # translation: camera position relative to LiDAR (x,y,z in meters)
+      extrinsic_R: [1.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 1.0]  # rotation matrix (identity = perfectly aligned axes)
+
+      # Rcl = rotation FROM camera frame TO LiDAR frame (3x3 matrix written row by row)
+      # Pcl = translation FROM camera origin TO LiDAR origin (in meters)
+      # These are used in vio.cpp → setLidarToCameraExtrinsic() to chain the transforms
+
+      # Currently set for: MARS_LVIG HKisland and HKairport datasets
+      
+      Rcl: [0.00438814,-0.999807,-0.0191582,-0.00978695,0.0191145,-0.999769,0.999942,0.00457463,-0.00970118]
+      Pcl: [0.016069, 0.0871753, -0.0718021]
+
+      #Rcl: [-0.0022464, -0.9997299, -0.0231319, -0.0084211, 0.0231501, -0.9996966, 0.9999620, -0.0020509, -0.0084708]
+      #Pcl: [-0.0025563, 0.0567484, -0.0512149]
+      # Alternative calibration for AMtown/AMvalley sequences (commented out):
+      # Rcl: [ -0.0022464, -0.9997299, -0.0231319,
+      #        -0.0084211,  0.0231501, -0.9996966,
+      #         0.9999620, -0.0020509, -0.0084708]
+      # Pcl: [-0.0025563, 0.0567484, -0.0512149]
+
+    time_offset:
+      # ── Timestamp synchronization between sensors ──────────────────────────
+      # If the LiDAR, IMU, and camera clocks are slightly out of sync,
+      # the map will look blurry or distorted. Tune these if that happens.
+      # Start at 0.0 for your own setup and adjust if needed.
+
+      imu_time_offset: 0.0    # shift IMU timestamps by N seconds (+ = delay IMU, - = advance)
+      img_time_offset: -0.1   # shift camera timestamps by N seconds
+                              # -0.1 means camera is 100ms behind — a known issue with this dataset
+      exposure_time_init: 0.0 # initial guess for camera exposure time (seconds)
+                              # 0.0 = let the algorithm estimate it automatically
+                              # For datasets with known exposure (e.g. AMtown = 0.0285s), set it here
+
+    # ╔═══════════════════════════════════════════════════════════════════════════════════════╗
+    # ║  Per-sequence settings reference table (from the original authors)                    ║
+    # ║  When playing a specific bag, use the matching img_time_offset and exposure_time_init ║
+    # ╠═══════════════════════════════════════════════════════════════════════════════════════╣
+    # ║    Series   │      ID     │ img_time_offset │ exposure_time_init │  -s (start hover)  ║
+    # ╠═══════════════════════════════════════════════════════════════════════════════════════╣
+    # ║  HKairport  │ HKairport01 │       0.1       │         0.0        │         75         ║
+    # ║             │ HKairport02 │      -0.1       │         0.0        │         60         ║
+    # ║             │ HKairport03 │      -0.1       │         0.0        │         62         ║
+    # ╠═══════════════════════════════════════════════════════════════════════════════════════╣
+    # ║  HKisland   │ HKisland01  │       0.0       │         0.0        │        118         ║
+    # ║             │ HKisland02  │       0.1       │         0.0        │         80         ║
+    # ║             │ HKisland03  │      -0.1       │         0.0        │         72         ║
+    # ╠═══════════════════════════════════════════════════════════════════════════════════════╣
+    # ║  AMtown     │ AMtown01    │      -0.1       │       0.0285       │         75         ║
+    # ║             │ AMtown02    │      -0.1       │       0.0285       │         50         ║
+    # ║             │ AMtown03    │      -0.1       │       0.0285       │        106         ║
+    # ╠═══════════════════════════════════════════════════════════════════════════════════════╣
+    # ║  AMvalley   │ AMvalley01  │      -0.1       │       0.0132       │         70         ║
+    # ║             │ AMvalley02  │      -0.1       │       0.0132       │         65         ║
+    # ║             │ AMvalley03  │      -0.1       │       0.0132       │         68         ║
+    # ╚═══════════════════════════════════════════════════════════════════════════════════════╝
+
+    preprocess:
+      # ── LiDAR point cloud filtering before it enters the algorithm ─────────
+      point_filter_num: 1     # keep 1 out of every N points (1=keep all, 2=keep half, 4=keep quarter)
+                              # increase to reduce CPU load on dense scans
+      filter_size_surf: 0.1   # voxel downsampling resolution (meters) applied before processing
+                              # 0.1 = merge points within 10cm cubes into one point
+                              # smaller = more detail but more CPU
+      lidar_type: 1           # LiDAR model: 1 = Livox Avia | 7 = Livox MID-360
+                              # CHANGE THIS TO 7 for your MID-360
+      scan_line: 6            # number of scan lines for the LiDAR model
+                              # Avia = 6, MID-360 = 4 — CHANGE TO 4 for your sensor
+      blind: 0.8              # ignore all points closer than 0.8m from sensor origin
+                              # removes self-hits on the drone body
+                              # adjust based on how close your sensor is to the robot frame
+
+    vio:
+      # ── Visual Inertial Odometry tuning ────────────────────────────────────
+      # Controls how the camera image is used to refine the pose estimate
+
+      max_iterations: 5           # EKF iterations per frame (more = more accurate but slower)
+                                  # 5 is a good balance for real-time operation
+
+      outlier_threshold: 1000     # reject visual features with photometric error above this value
+                                  # higher = more tolerant of bad matches (keeps more points)
+                                  # lower = stricter (fewer but better points)
+                                  # for thermal: may need to increase if thermal contrast is low
+
+      img_point_cov: 1000         # how much to trust camera measurements vs LiDAR/IMU
+                                  # higher = less trust in camera (LiDAR dominates)
+                                  # lower = more trust in camera
+                                  # 1000 here vs 100 in MARS_LVIG = camera trusted less
+                                  # for your thermal camera: start at 100, increase if map drifts
+
+      patch_size: 8               # size of image patch tracked per feature (8 = 8x8 pixels = 64 pixels total)
+                                  # larger patches = more robust but slower
+                                  # 8 is standard for most cameras including thermal
+
+      patch_pyrimid_level: 4      # number of image pyramid levels for multi-scale tracking
+                                  # 4 levels: full, half, quarter, eighth resolution
+                                  # handles both fast motion (coarse) and fine detail (fine)
+
+      normal_en: true             # use surface normals to compute more accurate patch warping
+                                  # true = better accuracy | false = simpler/faster
+                                  # keep true unless you have performance issues
+
+      raycast_en: false           # cast rays to find occluded map points (more complete but expensive)
+                                  # keep false for real-time operation
+
+      inverse_composition_en: false  # alternative EKF formulation (precomputes Jacobians on reference)
+                                     # can be faster for many iterations, but false is more stable
+
+      exposure_estimate_en: true  # simultaneously estimate camera exposure while optimizing pose
+                                  # IMPORTANT for thermal cameras — compensates for brightness drift
+                                  # caused by scene temperature changes between frames
+                                  # always keep true for your Flir Boson
+
+      inv_expo_cov: 0.1           # how aggressively to update exposure estimate each frame
+                                  # lower = more stable/slow adaptation
+                                  # higher = faster adaptation but can oscillate
+                                  # 0.1 is a good default
+
+    imu:
+      # ── IMU noise model ─────────────────────────────────────────────────────
+      # These values describe how noisy your IMU measurements are
+      # Get exact values from the IMU datasheet for best performance
+      # Wrong values = map drifts when camera is not helpful (e.g. dark/textureless areas)
+
+      imu_en: true        # use IMU for state propagation between LiDAR scans (always true)
+      imu_int_frame: 30   # number of IMU measurements to integrate per LiDAR scan
+                          # MID-360 IMU runs at ~200Hz, LiDAR at ~10Hz → ~20 IMU per scan
+                          # 30 gives some buffer for timing jitter
+
+      acc_cov: 2.0        # accelerometer white noise variance (m/s²)²
+                          # higher = less trust in IMU acceleration measurements
+                          # 2.0 is fairly high — means this dataset has noisy vibrations (drone)
+                          # for ground robot: typically 0.2–0.5
+
+      gyr_cov: 0.1        # gyroscope white noise variance (rad/s)²
+                          # lower = more trust in rotation rate measurements
+                          # gyros are usually more accurate than accelerometers
+
+      b_acc_cov: 0.0001   # accelerometer bias random walk (how fast the bias drifts over time)
+                          # very small = bias is stable (good IMU)
+
+      b_gyr_cov: 0.0001   # gyroscope bias random walk
+                          # very small = bias is stable (good IMU)
+
+    lio:
+      # ── LiDAR Inertial Odometry tuning ─────────────────────────────────────
+      # Controls how LiDAR point clouds are matched to the map (ICP-style)
+
+      max_iterations: 5       # ICP iterations per scan (more = more accurate but slower)
+
+      dept_err: 0.02          # LiDAR range measurement error (meters)
+                              # 2cm is typical for Livox sensors
+
+      beam_err: 0.05          # LiDAR beam angle error (radians)
+                              # 0.05 rad ≈ 3° — typical angular uncertainty
+
+      min_eigen_value: 0.005  # minimum eigenvalue to consider a plane valid for alignment
+                              # lower = accepts weaker planar features
+                              # too low = noise treated as planes
+
+      voxel_size: 2.0         # map voxel size in meters (2.0 = 2m cubes)
+                              # larger than MARS_LVIG.yaml (0.5) because this is an outdoor
+                              # aerial dataset with large open spaces
+                              # for indoor: use 0.5 | for outdoor/aerial: use 1.0–2.0
+                              # CHANGE for your use case
+
+      max_layer: 2            # octree depth inside each voxel (finer subdivisions)
+      max_points_num: 50      # max points stored per voxel (oldest discarded when full)
+      layer_init_num: [5, 5, 5, 5, 5]  # min points needed to initialize each octree layer
+
+    local_map:
+      # ── Map memory management ───────────────────────────────────────────────
+      map_sliding_en: false   # false = keep entire map in memory (fine for short sequences)
+                              # true = sliding window — only keep map within half_map_size radius
+                              # use true for long-duration runs to prevent memory overflow
+
+      half_map_size: 100      # if sliding enabled: keep 100m radius around the robot
+      sliding_thresh: 8.0     # slide the map when robot moves >8m from the map center
+
+    uav:
+      imu_rate_odom: false    # false = publish odometry at LiDAR rate (~10Hz)
+                              # true = publish at IMU rate (~200Hz) for UAV control loops
+                              # keep false unless running on a UAV that needs high-rate feedback
+
+      gravity_align_en: false # false here (unlike MARS_LVIG which has true)
+                              # false = don't force gravity alignment on startup
+                              # true = align initial orientation with gravity vector
+                              # set true if your robot starts from a known level position
+
+    publish:
+      # ── What to publish to ROS2 topics ─────────────────────────────────────
+      dense_map_en: true          # true = publish full point cloud to /cloud_registered
+                                  # false = only publish effect points (much less data)
+                                  # set false if RViz is lagging due to large point clouds
+
+      pub_effect_point_en: false  # publish points used for LIO alignment (debug only)
+                                  # useful to visualize which points the algorithm "sees"
+
+      pub_plane_en: false         # publish detected planes (debug only)
+                                  # useful to check if LiDAR is detecting surfaces correctly
+
+      pub_scan_num: 1             # publish every N LiDAR scans
+                                  # 1 = every scan | 2 = every other scan
+                                  # increase to reduce RViz load on slow machines
+
+      blind_rgb_points: 0.0       # ignore colored map points closer than this distance (meters)
+                                  # 0.0 = show all points including very close ones
+
+    evo:
+      # ── Trajectory evaluation (for measuring accuracy against ground truth) ─
+      seq_name: "HKisland01"  # name used in saved trajectory files
+                              # CHANGE THIS to your own sequence name when running your setup
+
+      pose_output_en: false   # true = save trajectory to file for evo evaluation tool
+                              # useful when you have ground truth to compare against
+                              # command: evo_ape tum ground_truth.txt estimated.txt
+
+    pcd_save:
+      # ── Saving the 3D map to disk ───────────────────────────────────────────
+      pcd_save_en: true      # true = save final map as .pcd file when node shuts down
+                              # open saved file with: CloudCompare or pcl_viewer
+                              # saved to: ~/thesis/src/fast_livo2/Log/PCD/
+
+      colmap_output_en: false # true = export images + camera poses for COLMAP mesh generation
+                              # REQUIRES interval: -1 (all frames in one run)
+                              # after sequence: run scripts/colmap_output.sh then scripts/mesh.py
+                              # saved to: ~/thesis/src/fast_livo2/Log/Colmap/
+                              # NOTE: for thermal camera, use colorized images for better COLMAP results
+
+      filter_size_pcd: 0.01   # downsample the saved PCD map to 15cm resolution
+                              # keeps file size manageable (full res maps can be gigabytes)
+                              # decrease for more detail, increase for smaller files
+
+      interval: 50           # how many LiDAR frames to save per PCD file
+                              # -1 = save ALL frames in ONE file at the end (recommended)
+                              # N  = save a new file every N frames (use for very long runs
+                              #      to avoid memory crash — e.g. interval: 100)

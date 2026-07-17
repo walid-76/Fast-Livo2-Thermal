@@ -1,0 +1,43 @@
+###########################################################################################
+
+How to run the main package to output raw therma data 16 bit or 8 bit:
+ros2 launch flir_boson_usb boson.launch.py
+
+###########################################################################################
+
+to run the thermal processing :
+ros2 run flir_boson_usb boson_camera_node --ros-args -p dev:="/dev/video0"
+
+###########################################################################################
+
+How to run the Lidar package for the mid 360:
+ros2 launch livox_ros_driver2 rviz_MID360_launch.py   with rviz
+ros2 launch livox_ros_driver2 msg_MID360_launch.py    for slam 
+
+
+###########################################################################################
+
+how to run the intel release d455 rgb camera only
+ros2 launch realsense2_camera rs_launch.py enable_color:=true enable_depth:=false enable_infra1:=false enable_infra2:=false
+
+
+
+
+###########################################################################################
+
+
+
+
+How to run the fast livo2 :
+this work currently with the island bag file ony 
+ros2 launch fast_livo mapping_aviz.launch.py use_rviz:=True use_sim_time:=True avia_params_file:=$HOME/thesis/src/fast_livo2/config/MARS_LVIG.yaml camera_params_file:=$HOME/thesis/src/fast_livo2/config/camera_MARS_LVIG.yaml
+ros2 bag play ~/datasets/HKisland_GNSS01 --clock --delay 3 --read-ahead-queue-size 1000
+
+to run the town file change some setting in the yaml file and then run it
+
+
+this file is for my custom use:
+
+ros2 launch fast_livo mapping_aviz.launch.py use_rviz:=True \
+avia_params_file:=$HOME/thesis/src/fast_livo2/config/MID360.yaml \
+camera_params_file:=$HOME/thesis/src/fast_livo2/config/Intel_D455.yaml

@@ -1,0 +1,3 @@
+# Camera list with one line of data per camera:
+#   CAMERA_ID, MODEL, WIDTH, HEIGHT, PARAMS[]
+1 EQUIDISTANT 760 1008 298.092349 298.074354 370.723419 497.932746

@@ -1,0 +1,19 @@
+# Ignore build and installation artifacts
+build/
+devel/
+install/
+log/
+
+# Ignore local environment or IDE settings
+.vscode/
+.venv/
+*.pyc# Ignore build and installation artifacts
+build/
+devel/
+install/
+log/
+
+# Ignore local environment or IDE settings
+.vscode/
+.venv/
+*.pyc

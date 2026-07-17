@@ -1,0 +1,15 @@
+/**:
+  ros__parameters:
+    camera:
+      model: Pinhole
+      width: 640          # from width field
+      height: 480         # from height field
+      scale: 1.0          # no downscaling needed, already low resolution
+      fx: 385.5947265625  # k[0]
+      fy: 384.50421142578125  # k[4]
+      cx: 320.099609375   # k[2]
+      cy: 242.02243041992188  # k[5]
+      d0: -0.05466747283935547    # d[0]
+      d1: 0.06333800405263901     # d[1]
+      d2: -0.0005165654583834112  # d[2]
+      d3: 0.00017864150868263096  # d[3]
