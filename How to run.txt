@@ -18,10 +18,18 @@ ros2 launch livox_ros_driver2 msg_MID360_launch.py    for slam
 ###########################################################################################
 
 how to run the intel release d455 rgb camera only
-ros2 launch realsense2_camera rs_launch.py enable_color:=true enable_depth:=false enable_infra1:=false enable_infra2:=false
+ros2 launch realsense2_camera rs_launch.py \
+    rgb_camera.profile:=1280x720x10 \
+    enable_depth:=false \
+    global_time_enabled:=false
 
-
-
+ros2 launch realsense2_camera rs_launch.py \
+  rgb_camera.color_profile:=1280x720x10 \
+  enable_depth:=false \
+  enable_infra1:=false \
+  enable_infra2:=false \
+  enable_sync:=true \
+  depth_module.inter_cam_sync_mode:=2
 
 ###########################################################################################
 

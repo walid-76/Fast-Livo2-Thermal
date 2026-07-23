@@ -19,10 +19,13 @@
 
       extrinsic_T: [0.011, 0.02329, -0.04412]          # ← MID-360 datasheet
       extrinsic_R: [1., 0., 0., 0., 1., 0., 0., 0., 1.] # ← MID-360 datasheet (identity)
-      Rcl: [...]   # ← Kalibr output after mounting D455
-      Pcl: [...]   # ← Kalibr output after mounting D455
+      
+      # first trial using the package, not 100 percent true
+      Rcl: [-0.0161635, -0.999862,  0.00378582, 
+            -0.0163135, -0.00352209, -0.999861, 
+             0.999736,  -0.016223,   -0.0162543]
 
-
+      Pcl: [-0.015, -0.082, 0.086]
     time_offset:
       # ── Timestamp synchronization between sensors ──────────────────────────
       # If the LiDAR, IMU, and camera clocks are slightly out of sync,

@@ -36,8 +36,14 @@
         "x": 0,
         "y": 0,
         "z": 0
-      }
+      },
+      "s_sync_source": 1,
+      "s_fpga_sync_mode": 1
     }
-  ]
+  ],
+  "timesync_config": {
+    "device_name": "/dev/ttyACM0",
+    "baudrate": 9600,
+    "time_sync_source": "PpsGps"
 }
-
+}
