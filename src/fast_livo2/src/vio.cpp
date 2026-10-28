@@ -64,6 +64,14 @@ VIOManager::~VIOManager()
   warp_map.clear();
   for (auto& pair : feat_map) delete pair.second;
   feat_map.clear();
+  // visual maps of the camera that is currently not active
+  for (int m = 0; m < 2; m++)
+  {
+    for (auto& pair : slot[m].warp_map) delete pair.second;
+    slot[m].warp_map.clear();
+    for (auto& pair : slot[m].feat_map) delete pair.second;
+    slot[m].feat_map.clear();
+  }
 }
 
 
@@ -89,132 +97,179 @@ void VIOManager::setLidarToCameraExtrinsic(vector<double> &R, vector<double> &P)
 // INITIALIZATION
 // ─────────────────────────────────────────────────────────────────────────────
 
+// Store the LiDAR->camera transform of camera m (0 = RGB, 1 = thermal) before initializeVIO()
+void VIOManager::setSlotExtrinsic(int m, vector<double> &R, vector<double> &P)
+{
+  slot[m].Rcl << MAT_FROM_ARRAY(R);
+  slot[m].Pcl << VEC_FROM_ARRAY(P);
+}
+
+
+/*
+ * initCameraSlot(m)
+ *
+ * Computes everything that depends on ONE camera (intrinsics, image size, IMU->camera transform, the constant
+ * Jacobian blocks, the grid and optionally the raycasting samples) and stores it in slot[m].
+ * This is the camera-dependent half of the old initializeVIO(), unchanged in content. It needs
+ * slot[m].cam, slot[m].Rcl/Pcl (setSlotExtrinsic) and Rli (setImuToLidarExtrinsic) to be set before.
+ */
+void VIOManager::initCameraSlot(int m)
+{
+  CameraSlot &s = slot[m];
+
+  s.fx = s.cam->fx();
+  s.fy = s.cam->fy();
+  s.cx = s.cam->cx();
+  s.cy = s.cam->cy();
+  s.image_resize_factor = s.cam->scale();
+  s.width = s.cam->width();
+  s.height = s.cam->height();
+  printf("[ camera %d ] intrinsic: %.6lf, %.6lf, %.6lf, %.6lf  width: %d, height: %d, scale: %f\n",
+         m, s.fx, s.fy, s.cx, s.cy, s.width, s.height, s.image_resize_factor);
+
+  // IMU->LiDAR->Camera
+  s.Rci = s.Rcl * Rli;
+  s.Pci = s.Rcl * Pli + s.Pcl;
+
+  // constant Jacobian blocks (used in updateState)
+  V3D Pic;
+  M3D tmp;
+  s.Jdphi_dR = s.Rci;
+  Pic = -s.Rci.transpose() * s.Pci;
+  tmp << SKEW_SYM_MATRX(Pic);
+  s.Jdp_dR = -s.Rci * tmp;
+
+  // grid: same rule as before, but evaluated per camera from the CONFIGURED values
+  if (grid_size_cfg > 10)
+  {
+    s.grid_size = grid_size_cfg;
+    s.grid_n_width = ceil(static_cast<double>(s.width / s.grid_size));
+    s.grid_n_height = ceil(static_cast<double>(s.height / s.grid_size));
+  }
+  else
+  {
+    s.grid_size = static_cast<int>(s.height / grid_n_height_cfg);
+    s.grid_n_height = ceil(static_cast<double>(s.height / s.grid_size));
+    s.grid_n_width = ceil(static_cast<double>(s.width / s.grid_size));
+  }
+  s.length = s.grid_n_width * s.grid_n_height;
+  printf("[ camera %d ] grid_size: %d, grid_n_height: %d, grid_n_width: %d, length: %d\n", m, s.grid_size, s.grid_n_height,
+         s.grid_n_width, s.length);
+
+  s.border_flag.clear();
+  std::vector<std::vector<V3D>>().swap(s.rays_with_sample_points);
+  if (raycast_en)
+  {
+    s.border_flag.resize(s.length, 0);
+    s.rays_with_sample_points.reserve(s.length);
+    float d_min = 0.1, d_max = 3.0, step = 0.2;
+    for (int grid_row = 1; grid_row <= s.grid_n_height; grid_row++)
+    {
+      for (int grid_col = 1; grid_col <= s.grid_n_width; grid_col++)
+      {
+        std::vector<V3D> SamplePointsEachGrid;
+        int index = (grid_row - 1) * s.grid_n_width + grid_col - 1;
+        if (grid_row == 1 || grid_col == 1 || grid_row == s.grid_n_height || grid_col == s.grid_n_width) s.border_flag[index] = 1;
+        int u = s.grid_size / 2 + (grid_col - 1) * s.grid_size;
+        int v = s.grid_size / 2 + (grid_row - 1) * s.grid_size;
+        for (float d_temp = d_min; d_temp <= d_max; d_temp += step)
+        {
+          V3D xyz;
+          xyz = s.cam->cam2world(u, v);
+          xyz *= d_temp / xyz[2];
+          SamplePointsEachGrid.push_back(xyz);
+        }
+        s.rays_with_sample_points.push_back(SamplePointsEachGrid);
+      }
+    }
+  }
+}
+
+
+/*
+ * activateSlot(m)
+ *
+ * Makes camera m the ACTIVE camera. Called by the mapper only between two LIO/VIO pairs.
+ *  1. the visual map of the camera we leave is parked in its slot (O(1) swap, nothing is deleted),
+ *  2. the visual map of the new camera is loaded (empty the first time),
+ *  3. all camera-dependent members (cam, fx.., width, Rci.., grid) are loaded from the slot,
+ *  4. everything that still points into the old map (visual_submap, sub_feat_map) is cleared.
+ * After this the next processFrame() runs entirely on the new camera. With an empty map it only seeds new
+ * points (LIO keeps carrying the pose for those frames), which is the "LIO bridge" of the design.
+ */
+void VIOManager::activateSlot(int m)
+{
+  if (m == active_slot) return;
+  if (slot[m].cam == nullptr)
+  {
+    RCLCPP_ERROR(rclcpp::get_logger("vio"), "activateSlot(%d): camera model not loaded, staying on slot %d", m, active_slot);
+    return;
+  }
+
+  // 1. park the map of the camera we leave: afterwards slot[old] holds it and the members hold an empty map
+  if (active_slot >= 0)
+  {
+    slot[active_slot].feat_map.swap(feat_map);
+    slot[active_slot].warp_map.swap(warp_map);
+  }
+  // 2. load the map of the new camera (the slot becomes empty, the members hold the live map)
+  feat_map.swap(slot[m].feat_map);
+  warp_map.swap(slot[m].warp_map);
+
+  // 3. camera-dependent members
+  const CameraSlot &s = slot[m];
+  cam = s.cam;
+  equidistant_cam = dynamic_cast<vk::EquidistantCamera *>(cam);
+  fx = s.fx; fy = s.fy; cx = s.cx; cy = s.cy;
+  image_resize_factor = s.image_resize_factor;
+  width = s.width; height = s.height;
+  Rcl = s.Rcl; Pcl = s.Pcl; Rci = s.Rci; Pci = s.Pci;
+  Jdphi_dR = s.Jdphi_dR; Jdp_dR = s.Jdp_dR;
+  grid_size = s.grid_size; grid_n_width = s.grid_n_width; grid_n_height = s.grid_n_height; length = s.length;
+  border_flag = s.border_flag;
+  rays_with_sample_points = s.rays_with_sample_points;
+  outlier_threshold = s.outlier_threshold;
+  img_point_cov = s.img_point_cov;
+
+  grid_num.assign(length, TYPE_UNKNOWN);
+  map_index.assign(length, 0);
+  map_dist.assign(length, 10000.0f);
+  update_flag.assign(length, 0);
+  scan_value.assign(length, 0.0f);
+
+  // 4. nothing may keep pointing into the other camera's map
+  visual_submap->reset();
+  sub_feat_map.clear();
+  total_points = 0;
+  has_ref_patch_cache = false;
+
+  active_slot = m;
+}
+
+
 /*
  * initializeVIO()
- * 
- * PURPOSE: One-time setup before processing any frames.
- *          Reads camera parameters, sets up grid, prepares data structures.
- * 
- * WHAT IT DOES STEP BY STEP:
- *  1. Creates the sparse visual map (SubSparseMap)
- *  2. Reads camera intrinsics (fx, fy, cx, cy) from the camera model
- *  3. Computes the full IMU→Camera transform (Rci, Pci) by chaining:
- *     IMU→LiDAR (Rli, Pli) then LiDAR→Camera (Rcl, Pcl)
- *  4. Pre-computes Jacobian terms that don't change between frames
- *  5. Sets up the image grid (divides image into cells for feature management)
- *  6. If raycast_en: precomputes ray directions for each grid cell
- *  7. If colmap_output_en: opens output files for 3D reconstruction export
- *  8. Allocates all per-grid arrays
- * 
- * FOR YOUR THERMAL CAMERA:
- *   fx, fy, cx, cy will come from your Boson calibration.
- *   image_resize_factor (scale) lets you run at lower resolution to save CPU.
+ *
+ * One-time setup before processing any frames: sparse visual map, per-camera constants for every loaded camera,
+ * patch configuration. The first camera (slot 0, RGB) becomes active.
+ * The camera-dependent part moved into initCameraSlot(); the rest is as before.
  */
 void VIOManager::initializeVIO()
 {
   visual_submap = new SubSparseMap;
 
-  // Read camera intrinsics from the camera model object
-  // (loaded from camera_MARS_LVIG.yaml or your custom thermal camera yaml)
-  fx = cam->fx();   // focal length in pixels, horizontal
-  fy = cam->fy();   // focal length in pixels, vertical
-  cx = cam->cx();   // principal point (image center), horizontal
-  cy = cam->cy();   // principal point (image center), vertical
-  image_resize_factor = cam->scale();  // downscale factor (e.g. 0.25 = quarter resolution)
+  // grid_size / grid_n_height as configured: they are interpreted separately for every camera
+  grid_size_cfg = grid_size;
+  grid_n_height_cfg = grid_n_height;
 
-  printf("intrinsic: %.6lf, %.6lf, %.6lf, %.6lf\n", fx, fy, cx, cy);
+  for (int m = 0; m < 2; m++)
+    if (slot[m].cam != nullptr) initCameraSlot(m);
 
-  width = cam->width();
-  height = cam->height();
+  activateSlot(0);
 
-  printf("width: %d, height: %d, scale: %f\n", width, height, image_resize_factor);
-
-  // Chain the transforms: IMU→LiDAR→Camera = IMU→Camera
-  // Rci = rotation from Camera to IMU frame (used to transform points)
-  // Pci = translation from Camera origin to IMU origin
-  Rci = Rcl * Rli;
-  Pci = Rcl * Pli + Pcl;
-
-  // Pre-compute Jacobian building blocks that are constant (don't change per frame)
-  // These are used in updateState() to compute how pixel error changes with pose
-  V3D Pic;
-  M3D tmp;
-  Jdphi_dR = Rci;                    // partial derivative: rotation component
-  Pic = -Rci.transpose() * Pci;      // camera position in IMU frame
-  tmp << SKEW_SYM_MATRX(Pic);        // skew-symmetric matrix of Pic (for cross product)
-  Jdp_dR = -Rci * tmp;              // partial derivative: translation-via-rotation component
-
-  // ── Grid setup ─────────────────────────────────────────────────────────────
-  // The image is divided into a grid of cells.
-  // Each cell can hold at most ONE tracked feature — this prevents features
-  // from clustering in one area and ensures even coverage across the image.
-  // This is especially important for thermal images where hot spots might
-  // attract many features to one area.
-  if (grid_size > 10)
-  {
-    // grid_size is set manually — compute how many cells fit
-    grid_n_width  = ceil(static_cast<double>(width  / grid_size));
-    grid_n_height = ceil(static_cast<double>(height / grid_size));
-  }
-  else
-  {
-    // grid_n_height is set — compute the appropriate grid_size
-    grid_size     = static_cast<int>(height / grid_n_height);
-    grid_n_height = ceil(static_cast<double>(height / grid_size));
-    grid_n_width  = ceil(static_cast<double>(width  / grid_size));
-  }
-  length = grid_n_width * grid_n_height;  // total number of grid cells
-
-  // ── Raycasting setup (optional, expensive) ─────────────────────────────────
-  // If raycast_en=true, for each empty grid cell, cast a ray into the 3D map
-  // to find map points that might be visible but weren't projected directly.
-  // Useful for finding occluded points but costs extra CPU. Usually left off.
-  if(raycast_en)
-  {
-    border_flag.resize(length, 0);  // mark border cells (edges of image)
-
-    std::vector<std::vector<V3D>>().swap(rays_with_sample_points);
-    rays_with_sample_points.reserve(length);
-    printf("grid_size: %d, grid_n_height: %d, grid_n_width: %d, length: %d\n",
-           grid_size, grid_n_height, grid_n_width, length);
-
-    // For each grid cell, precompute 3D ray sample points at distances 0.1→3.0m
-    float d_min = 0.1, d_max = 3.0, step = 0.2;
-    for (int grid_row = 1; grid_row <= grid_n_height; grid_row++)
-    {
-      for (int grid_col = 1; grid_col <= grid_n_width; grid_col++)
-      {
-        std::vector<V3D> SamplePointsEachGrid;
-        int index = (grid_row - 1) * grid_n_width + grid_col - 1;
-
-        // Mark cells on the image border
-        if (grid_row == 1 || grid_col == 1 ||
-            grid_row == grid_n_height || grid_col == grid_n_width)
-          border_flag[index] = 1;
-
-        // Center pixel of this grid cell
-        int u = grid_size / 2 + (grid_col - 1) * grid_size;
-        int v = grid_size / 2 + (grid_row - 1) * grid_size;
-
-        // Sample along the ray from this pixel at multiple depths
-        for (float d_temp = d_min; d_temp <= d_max; d_temp += step)
-        {
-          V3D xyz;
-          xyz = cam->cam2world(u, v);        // direction of ray from pixel
-          xyz *= d_temp / xyz[2];            // scale to depth d_temp
-          SamplePointsEachGrid.push_back(xyz);
-        }
-        rays_with_sample_points.push_back(SamplePointsEachGrid);
-      }
-    }
-  }
-
-  // ── COLMAP output setup (optional) ─────────────────────────────────────────
-  // If colmap_output_en=true, save images + camera poses so COLMAP can
-  // generate a textured 3D mesh from the sequence.
+  // ── COLMAP output setup (optional, uses the RGB camera) ─────────────────────
   if(colmap_output_en)
   {
-    equidistant_cam = dynamic_cast<vk::EquidistantCamera*>(cam);
     fout_colmap.open(DEBUG_FILE_DIR("Colmap/sparse/0/images.txt"), ios::out);
     fout_colmap << "# Image list with two lines of data per image:\n";
     fout_colmap << "#   IMAGE_ID, QW, QX, QY, QZ, TX, TY, TZ, CAMERA_ID, NAME\n";
@@ -228,13 +283,6 @@ void VIOManager::initializeVIO()
         << cx << " " << cy << std::endl;
     fout_camera.close();
   }
-
-  // ── Allocate per-grid arrays ────────────────────────────────────────────────
-  grid_num.resize(length);      // type of content in each cell (MAP / POINTCLOUD / UNKNOWN)
-  map_index.resize(length);     // which map point is in each cell
-  map_dist.resize(length);      // distance to map point in each cell (pick closest)
-  update_flag.resize(length);   // whether this cell's point needs updating
-  scan_value.resize(length);    // Shi-Tomasi score for new point candidates
 
   // Patch configuration (from config: patch_size, patch_pyrimid_level)
   patch_size_total = patch_size * patch_size;               // total pixels per patch

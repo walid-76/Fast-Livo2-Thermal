@@ -80,9 +80,33 @@ public:
   }
 };
 
+// Everything that belongs to ONE camera: its model, extrinsics, image/grid sizes and its OWN visual map.
+// The VIOManager keeps one slot per camera (0 = RGB, 1 = thermal). The members of VIOManager (cam, fx, width,
+// feat_map, ...) always hold the ACTIVE camera; activateSlot() swaps them. The visual map of a camera is never
+// mixed with the other one, because its patches only make sense in that camera's image.
+struct CameraSlot
+{
+  vk::AbstractCamera *cam = nullptr;
+  M3D Rcl = M3D::Identity(), Rci = M3D::Identity(), Jdphi_dR = M3D::Identity(), Jdp_dR = M3D::Zero();
+  V3D Pcl = V3D::Zero(), Pci = V3D::Zero();
+  double fx = 0, fy = 0, cx = 0, cy = 0, image_resize_factor = 1.0;
+  int width = 0, height = 0, grid_size = 0, grid_n_width = 0, grid_n_height = 0, length = 0;
+  double outlier_threshold = 0, img_point_cov = 0;
+  vector<int> border_flag;
+  std::vector<std::vector<V3D>> rays_with_sample_points;
+  // Parked visual map. Only filled while this camera is NOT active (the active camera's map lives in
+  // VIOManager::feat_map / warp_map).
+  unordered_map<VOXEL_LOCATION, VOXEL_POINTS *> feat_map;
+  unordered_map<int, Warp *> warp_map;
+};
+
 class VIOManager
 {
 public:
+  CameraSlot slot[2];        // 0 = RGB, 1 = thermal
+  int active_slot = -1;      // which slot the members below currently describe
+  int grid_size_cfg = 5;     // grid_size / grid_n_height as configured (interpreted per camera)
+  int grid_n_height_cfg = 17;
   int grid_size;
   vk::AbstractCamera *cam;
   vk::EquidistantCamera *equidistant_cam;
@@ -149,6 +173,9 @@ public:
   void setImuToLidarExtrinsic(const V3D &transl, const M3D &rot);
   void setLidarToCameraExtrinsic(vector<double> &R, vector<double> &P);
   void initializeVIO();
+  void setSlotExtrinsic(int m, vector<double> &R, vector<double> &P);
+  void initCameraSlot(int m);  // compute the camera-dependent constants of slot m (no side effects on the active camera)
+  void activateSlot(int m);    // make camera m the active one (parks the old visual map, loads the other)
   void getImagePatch(cv::Mat img, V2D pc, float *patch_tmp, int level);
   void computeProjectionJacobian(V3D p, MD(2, 3) & J);
   void computeJacobianAndUpdateEKF(cv::Mat img);

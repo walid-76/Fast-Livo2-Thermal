@@ -68,6 +68,8 @@ struct MeasureGroup
   double lio_time;
   deque<sensor_msgs::msg::Imu::ConstSharedPtr> imu;
   cv::Mat img;
+  bool vio_valid = true;  // false: the visual update must be skipped for this image (thermal shutter)
+  int modality = 0;       // which camera produced img: 0 = RGB, 1 = thermal
   MeasureGroup()
   {
     vio_time = 0.0;

@@ -137,6 +137,28 @@ void LIVMapper::readParameters(rclcpp::Node::SharedPtr &node)
   try_declare.template operator()<bool>("publish.pub_effect_point_en", false);
   try_declare.template operator()<bool>("publish.dense_map_en", false);
 
+  // ---- second camera (thermal) and automatic RGB <-> thermal switching ----
+  try_declare.template operator()<std::string>("common.thermal_img_topic", "/flir_boson/image_raw");
+  try_declare.template operator()<double>("time_offset.thermal_img_time_offset", 0.0);
+  try_declare.template operator()<vector<double>>("extrin_calib.Pcl_thermal", vector<double>{});
+  try_declare.template operator()<vector<double>>("extrin_calib.Rcl_thermal", vector<double>{});
+  try_declare.template operator()<int>("vio.outlier_threshold_thermal", -1);  // -1 = same as RGB
+  try_declare.template operator()<int>("vio.img_point_cov_thermal", -1);      // -1 = same as RGB
+
+  try_declare.template operator()<std::string>("visual_mode.select", "auto");  // auto | rgb | thermal
+  try_declare.template operator()<double>("visual_mode.dark_level", 35.0);
+  try_declare.template operator()<double>("visual_mode.flat_level", 4.0);
+  try_declare.template operator()<double>("visual_mode.dark_enter", 0.80);
+  try_declare.template operator()<double>("visual_mode.dark_exit", 0.50);
+  try_declare.template operator()<double>("visual_mode.flat_enter", 2.0);  // 2.0 = smoke/flat rule disabled
+  try_declare.template operator()<double>("visual_mode.flat_exit", 2.0);
+  try_declare.template operator()<double>("visual_mode.enter_time", 1.0);
+  try_declare.template operator()<double>("visual_mode.exit_time", 3.0);
+  try_declare.template operator()<double>("visual_mode.min_dwell", 5.0);
+  try_declare.template operator()<double>("shutter.freeze_eps", 0.02);
+  try_declare.template operator()<int>("shutter.settle_frames", 6);
+  try_declare.template operator()<bool>("shutter.enabled", true);
+
   // get parameter
   this->node->get_parameter("common.lid_topic", lid_topic);
   this->node->get_parameter("common.imu_topic", imu_topic);
@@ -196,6 +218,32 @@ void LIVMapper::readParameters(rclcpp::Node::SharedPtr &node)
   this->node->get_parameter("publish.pub_scan_num", pub_scan_num);
   this->node->get_parameter("publish.pub_effect_point_en", pub_effect_point_en);
   this->node->get_parameter("publish.dense_map_en", dense_map_en);
+
+  this->node->get_parameter("common.thermal_img_topic", thermal_img_topic);
+  this->node->get_parameter("time_offset.thermal_img_time_offset", thermal_img_time_offset);
+  this->node->get_parameter("extrin_calib.Pcl_thermal", cameraextrinT_thermal);
+  this->node->get_parameter("extrin_calib.Rcl_thermal", cameraextrinR_thermal);
+  this->node->get_parameter("vio.outlier_threshold_thermal", outlier_threshold_thermal);
+  this->node->get_parameter("vio.img_point_cov_thermal", img_point_cov_thermal);
+
+  HealthParams hp;
+  this->node->get_parameter("visual_mode.select", hp.select);
+  this->node->get_parameter("visual_mode.dark_level", hp.dark_level);
+  this->node->get_parameter("visual_mode.flat_level", hp.flat_level);
+  this->node->get_parameter("visual_mode.dark_enter", hp.dark_enter);
+  this->node->get_parameter("visual_mode.dark_exit", hp.dark_exit);
+  this->node->get_parameter("visual_mode.flat_enter", hp.flat_enter);
+  this->node->get_parameter("visual_mode.flat_exit", hp.flat_exit);
+  this->node->get_parameter("visual_mode.enter_time", hp.enter_time);
+  this->node->get_parameter("visual_mode.exit_time", hp.exit_time);
+  this->node->get_parameter("visual_mode.min_dwell", hp.min_dwell);
+  mode_mgr_ = VisualModeManager(hp);
+
+  ShutterParams sp;
+  this->node->get_parameter("shutter.freeze_eps", sp.freeze_eps);
+  this->node->get_parameter("shutter.settle_frames", sp.settle_frames);
+  this->node->get_parameter("shutter.enabled", sp.enabled);
+  shutter_gate_ = ThermalShutterGate(sp);
 }
 
 
@@ -221,13 +269,42 @@ void LIVMapper::initializeComponents(rclcpp::Node::SharedPtr &node)
   voxelmap_manager->extT_ << VEC_FROM_ARRAY(extrinT);
   voxelmap_manager->extR_ << MAT_FROM_ARRAY(extrinR);
 
-  if (!vk::camera_loader::loadFromRosNs(this->node, "camera", vio_manager->cam)) throw std::runtime_error("Camera model not correctly specified.");
+  // camera 0 = RGB, loaded from the "camera" namespace exactly as before
+  if (!vk::camera_loader::loadFromRosNs(this->node, "camera", vio_manager->slot[0].cam)) throw std::runtime_error("Camera model not correctly specified.");
+
+  // camera 1 = thermal, from the "camera_thermal" namespace. Optional: without it everything runs on RGB only.
+  thermal_available_ = false;
+  try
+  {
+    if (cameraextrinR_thermal.size() == 9 && cameraextrinT_thermal.size() == 3 &&
+        vk::camera_loader::loadFromRosNs(this->node, "camera_thermal", vio_manager->slot[1].cam))
+      thermal_available_ = true;
+  }
+  catch (const std::exception &e)
+  {
+    RCLCPP_WARN(this->node->get_logger(), "[ MODE ] thermal camera could not be loaded: %s", e.what());
+  }
+  if (!thermal_available_)
+  {
+    vio_manager->slot[1].cam = nullptr;
+    RCLCPP_WARN(this->node->get_logger(),
+                "[ MODE ] thermal camera not configured (camera_thermal.*, extrin_calib.Rcl_thermal / Pcl_thermal): running on RGB only");
+  }
 
   vio_manager->grid_size = grid_size;
   vio_manager->patch_size = patch_size;
   vio_manager->outlier_threshold = outlier_threshold;
   vio_manager->setImuToLidarExtrinsic(extT, extR);
   vio_manager->setLidarToCameraExtrinsic(cameraextrinR, cameraextrinT);
+  vio_manager->setSlotExtrinsic(0, cameraextrinR, cameraextrinT);
+  vio_manager->slot[0].outlier_threshold = outlier_threshold;
+  vio_manager->slot[0].img_point_cov = IMG_POINT_COV;
+  if (thermal_available_)
+  {
+    vio_manager->setSlotExtrinsic(1, cameraextrinR_thermal, cameraextrinT_thermal);
+    vio_manager->slot[1].outlier_threshold = (outlier_threshold_thermal >= 0) ? outlier_threshold_thermal : outlier_threshold;
+    vio_manager->slot[1].img_point_cov = (img_point_cov_thermal >= 0) ? img_point_cov_thermal : IMG_POINT_COV;
+  }
   vio_manager->state = &_state;
   vio_manager->state_propagat = &state_propagat;
   vio_manager->max_iterations = max_iterations;
@@ -340,6 +417,11 @@ void LIVMapper::initializeSubscribersAndPublishers(rclcpp::Node::SharedPtr &node
     sub_img = this->node->create_subscription<sensor_msgs::msg::Image>(
       img_topic, 200000, std::bind(&LIVMapper::img_cbk, this, std::placeholders::_1));
   }
+  if (thermal_available_ && !enable_image_processing)
+  {
+    sub_img_thermal = this->node->create_subscription<sensor_msgs::msg::Image>(
+      thermal_img_topic, 200000, std::bind(&LIVMapper::thermal_img_cbk, this, std::placeholders::_1));
+  }
   pubLaserCloudFullRes = this->node->create_publisher<sensor_msgs::msg::PointCloud2>("/cloud_registered", 100);
   pubNormal = this->node->create_publisher<visualization_msgs::msg::MarkerArray>("/visualization_marker", 100);
   pubSubVisualMap = this->node->create_publisher<sensor_msgs::msg::PointCloud2>("/cloud_visual_sub_map_before", 100);
@@ -392,6 +474,7 @@ void LIVMapper::jpeg_callback(const sensor_msgs::msg::CompressedImage::SharedPtr
         mtx_buffer.lock();
         img_buffer.push_back(image);
         img_time_buffer.push_back(msg_header_time);
+        img_meta_buffer_.push_back(ImgMeta{0, true});
         last_timestamp_img = msg_header_time;
         mtx_buffer.unlock();
         // Notify processing thread
@@ -491,6 +574,25 @@ void LIVMapper::handleVIO()
     return;
   }
     
+  // which camera / is the frame usable? (thermal shutter frames are flagged in the image callback)
+  const MeasureGroup &mg = LidarMeasures.measures.back();
+  {
+    static std::ofstream fmode(std::string(ROOT_DIR) + "Log/mode.csv");
+    fmode << std::fixed << std::setprecision(6) << LidarMeasures.last_lio_update_time - _first_lidar_time << "," << mg.modality << ","
+          << (mg.vio_valid ? 1 : 0) << "\n";
+  }
+  if (!mg.vio_valid)
+  {
+    // Skip the whole visual update for this frame: no pose correction AND no new patches from a frozen image.
+    // The LIO result of this step stands, the filter state is left exactly as LIO produced it.
+    std::cout << "[ VIO ] frame blocked (thermal shutter), LIO only" << std::endl;
+    euler_cur = RotMtoEuler(_state.rot_end);
+    fout_out << std::setw(20) << LidarMeasures.last_lio_update_time - _first_lidar_time << " " << euler_cur.transpose() * 57.3 << " "
+              << _state.pos_end.transpose() << " " << _state.vel_end.transpose() << " " << _state.bias_g.transpose() << " "
+              << _state.bias_a.transpose() << " " << V3D(_state.inv_expo_time, 0, 0).transpose() << " " << feats_undistort->points.size() << std::endl;
+    return;
+  }
+
   std::cout << "[ VIO ] Raw feature num: " << pcl_w_wait_pub->points.size() << std::endl;
 
   if (fabs((LidarMeasures.last_lio_update_time - _first_lidar_time) - plot_time) < (frame_cnt / 2 * 0.1)) 
@@ -502,7 +604,22 @@ void LIVMapper::handleVIO()
     vio_manager->plot_flag = false;
   }
 
+  // ==================== VIO BENCHMARK TIMING START ====================
+  double t_vio_start = omp_get_wtime();
+
   vio_manager->processFrame(LidarMeasures.measures.back().img, _pv_list, voxelmap_manager->voxel_map_, LidarMeasures.last_lio_update_time - _first_lidar_time);
+
+  double t_vio_end = omp_get_wtime();
+  
+  static double aver_time_vio = 0.0;
+  static int vio_frame_num = 0;
+  vio_frame_num++;
+  double current_vio_time = t_vio_end - t_vio_start;
+  aver_time_vio = aver_time_vio * (vio_frame_num - 1) / vio_frame_num + current_vio_time / vio_frame_num;
+
+  printf("\033[1;32m[ VIO Benchmark ] Current: %0.6f secs | AVERAGE: %0.6f secs (%0.2f ms)\033[0m\n", 
+         current_vio_time, aver_time_vio, aver_time_vio * 1000.0);
+  // ==================== VIO BENCHMARK TIMING END ======================
 
   if (imu_prop_enable) 
   {
@@ -748,22 +865,25 @@ void LIVMapper::run(rclcpp::Node::SharedPtr &node)
 {
   rclcpp::Rate rate(5000);
   while (rclcpp::ok()) 
-  {
+{
     rclcpp::spin_some(this->node);
     if (!sync_packages(LidarMeasures)) 
     {
-      rate.sleep();
+      try 
+      {
+        rate.sleep();
+      } 
+      catch (const std::exception &e) 
+      {
+        break;
+      }
       continue;
     }
     handleFirstFrame();
-
     processImu();
-
-    // if (!p_imu->imu_time_init) continue;
-
     stateEstimationAndMapping();
-  }
-  savePCD();
+}
+savePCD();
 }
 
 
@@ -1067,34 +1187,77 @@ cv::Mat LIVMapper::getImageFromMsg(const sensor_msgs::msg::Image::ConstSharedPtr
 // This is the "Visual Librarian." It takes the pictures, writes the exact "LiDAR-time" on the back of them,
 //  and files them in a drawer (img_buffer) so the SLAM engine can find them later.
 // NOTE!!!!!!! might me important for synchornizatoin with the thermal camera
-void LIVMapper::img_cbk(const sensor_msgs::msg::Image::ConstSharedPtr &msg_in)
+// Both cameras come through handleImage(). EVERY frame of BOTH cameras first passes its gate:
+//   RGB     -> darkness check (VisualModeManager): decides which camera the odometry should use,
+//   thermal -> shutter detector (ThermalShutterGate): flags frozen/settling frames as "do not use for VIO".
+// Only frames of the camera that is wanted right now are queued for the odometry; the frame is queued together
+// with its camera index and the VIO-valid flag, which travel with it through sync_packages() to handleVIO().
+void LIVMapper::img_cbk(const sensor_msgs::msg::Image::ConstSharedPtr &msg_in) { handleImage(msg_in, 0); }
+
+void LIVMapper::thermal_img_cbk(const sensor_msgs::msg::Image::ConstSharedPtr &msg_in) { handleImage(msg_in, 1); }
+
+// Which camera should the odometry use now? 0 = RGB, 1 = thermal.
+int LIVMapper::desiredModality() const
+{
+  if (!thermal_available_) return 0;
+  const std::string &sel = mode_mgr_.params().select;
+  if (sel == "rgb") return 0;
+  if (sel == "thermal") return 1;
+  return mode_mgr_.desired() == VisualModality::THERMAL ? 1 : 0;
+}
+
+// Called from sync_packages() between two LIO/VIO pairs.
+void LIVMapper::switchModality(int m)
+{
+  RCLCPP_WARN(this->node->get_logger(), "[ MODE ] switching visual odometry camera: %s -> %s  (lio time %.2f s)",
+              active_modality_ == 0 ? "RGB" : "THERMAL", m == 0 ? "RGB" : "THERMAL",
+              LidarMeasures.last_lio_update_time - _first_lidar_time);
+  vio_manager->activateSlot(m);       // camera model, extrinsics, grid and the visual map of that camera
+  _state.inv_expo_time = 1.0;         // the exposure estimate of the other camera means nothing here
+  active_modality_ = m;
+  mode_switch_count_++;
+}
+
+void LIVMapper::handleImage(const sensor_msgs::msg::Image::ConstSharedPtr &msg_in, int mod)
 {
   if (!img_en) return;
-  if (enable_image_processing) {
+  if (enable_image_processing)
+  {
     RCLCPP_DEBUG(node->get_logger(), "Skipping raw image processing");
     return;
   }
-  sensor_msgs::msg::Image::SharedPtr msg(new sensor_msgs::msg::Image(*msg_in));
-  // if ((abs(stamp2Sec(msg->header.stamp) - last_timestamp_img) > 0.2 && last_timestamp_img > 0) || sync_jump_flag)
-  // {
-  //   RCLCPP_WARN(this->node->get_logger(), "img jumps %.3f\n", stamp2Sec(msg->header.stamp) - last_timestamp_img);
-  //   sync_jump_flag = true;
-  //   msg->header.stamp = rclcpp::Time().fromSec(last_timestamp_img + 0.1);
-  // }
+  if (mod == 1 && !thermal_available_) return;
 
-  // Hiliti2022 40Hz
-  // if (hilti_en)
-  // {
-  //   i++;
-  //   if (i % 4 != 0) return;
-  // }
-  // double msg_header_time =  stamp2Sec(msg->header.stamp);
-  double msg_header_time = stamp2Sec(msg->header.stamp) + img_time_offset;
-  if (abs(msg_header_time - last_timestamp_img) < 0.001) return;
+  const double msg_header_time = stamp2Sec(msg_in->header.stamp) + (mod == 0 ? img_time_offset : thermal_img_time_offset);
+  cv::Mat img_cur = getImageFromMsg(msg_in);
+
+  // ---- gates: run on every frame of this camera, whether or not it is the active one ----
+  bool blocked = false;
+  if (mod == 1)
+  {
+    blocked = shutter_gate_.update(img_cur, msg_header_time);
+    static std::ofstream fshutter(std::string(ROOT_DIR) + "Log/shutter.csv");
+    const auto &sh = shutter_gate_.last();
+    fshutter << std::fixed << sh.t << "," << sh.diff << "," << sh.frozen << "," << sh.blocked << "," << sh.run << "\n";
+  }
+  else
+  {
+    mode_mgr_.update(img_cur, msg_header_time);
+    static std::ofstream fhealth(std::string(ROOT_DIR) + "Log/health.csv");
+    const auto &h = mode_mgr_.last();
+    fhealth << std::fixed << h.t << "," << h.dark_frac << "," << h.flat_frac << "," << h.bad_frac << "," << (int)mode_mgr_.desired() << "\n";
+  }
+
+  // ---- only the wanted camera feeds the odometry ----
+  if (mod != desiredModality()) return;
+
+  // the original per-image checks, now kept separately per camera (the two cameras are not synchronised)
+  double &last_ts = last_timestamp_img_mod_[mod];
+  if (abs(msg_header_time - last_ts) < 0.001) return;
   RCLCPP_INFO(this->node->get_logger(), "Get image, its header time: %.6f", msg_header_time);
   if (last_timestamp_lidar < 0) return;
 
-  if (msg_header_time < last_timestamp_img)
+  if (msg_header_time < last_ts)
   {
     RCLCPP_ERROR(this->node->get_logger(), "image loop back. \n");
     return;
@@ -1102,9 +1265,9 @@ void LIVMapper::img_cbk(const sensor_msgs::msg::Image::ConstSharedPtr &msg_in)
 
   mtx_buffer.lock();
 
-  double img_time_correct = msg_header_time; // last_timestamp_lidar + 0.105;
+  double img_time_correct = msg_header_time;
 
-  if (img_time_correct - last_timestamp_img < 0.02)
+  if (img_time_correct - last_ts < 0.02)
   {
     RCLCPP_WARN(this->node->get_logger(), "Image need Jumps: %.6f", img_time_correct);
     mtx_buffer.unlock();
@@ -1112,16 +1275,12 @@ void LIVMapper::img_cbk(const sensor_msgs::msg::Image::ConstSharedPtr &msg_in)
     return;
   }
 
-  cv::Mat img_cur = getImageFromMsg(msg);
   img_buffer.push_back(img_cur);
   img_time_buffer.push_back(img_time_correct);
+  img_meta_buffer_.push_back(ImgMeta{mod, !blocked});
 
-  // ROS_INFO("Correct Image time: %.6f", img_time_correct);
-
+  last_ts = img_time_correct;
   last_timestamp_img = img_time_correct;
-  // cv::imshow("img", img);
-  // cv::waitKey(1);
-  // cout<<"last_timestamp_img:::"<<last_timestamp_img<<endl;
   mtx_buffer.unlock();
   sig_buffer.notify_all();
 }
@@ -1197,6 +1356,11 @@ bool LIVMapper::sync_packages(LidarMeasureGroup &meas)
     case VIO:
     {
       // printf("!!! meas.lio_vio_flg: %d \n", meas.lio_vio_flg);
+      // A new LIO+VIO pair starts here, the only safe moment to change the camera: if the next image comes from
+      // the other camera, switch now so that this pair (and everything after it) uses the new camera model,
+      // extrinsics and visual map.
+      if (!img_meta_buffer_.empty() && img_meta_buffer_.front().modality != active_modality_)
+        switchModality(img_meta_buffer_.front().modality);
       double img_capture_time = img_time_buffer.front() + exposure_time_init;
       /*** has img topic, but img topic timestamp larger than lidar end time,
        * process lidar topic. After LIO update, the meas.lidar_frame_end_time
@@ -1213,6 +1377,7 @@ bool LIVMapper::sync_packages(LidarMeasureGroup &meas)
       {
         img_buffer.pop_front();
         img_time_buffer.pop_front();
+        if (!img_meta_buffer_.empty()) img_meta_buffer_.pop_front();
         RCLCPP_ERROR(this->node->get_logger(), "[ Data Cut ] Throw one image frame! \n");
         return false;
       }
@@ -1301,6 +1466,11 @@ bool LIVMapper::sync_packages(LidarMeasureGroup &meas)
       m.vio_time = img_capture_time;
       m.lio_time = meas.last_lio_update_time;
       m.img = img_buffer.front();
+      if (!img_meta_buffer_.empty())
+      {
+        m.vio_valid = img_meta_buffer_.front().vio_valid;
+        m.modality = img_meta_buffer_.front().modality;
+      }
       mtx_buffer.lock();
       // while ((!imu_buffer.empty() && (imu_time < img_capture_time)))
       // {
@@ -1313,6 +1483,7 @@ bool LIVMapper::sync_packages(LidarMeasureGroup &meas)
       // }
       img_buffer.pop_front();
       img_time_buffer.pop_front();
+      if (!img_meta_buffer_.empty()) img_meta_buffer_.pop_front();
       mtx_buffer.unlock();
       sig_buffer.notify_all();
       meas.measures.push_back(m);

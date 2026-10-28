@@ -1,0 +1,29 @@
+/**:
+  ros__parameters:
+    camera:                  # RGB, exactly as it is now
+      model: Pinhole
+      width: 1280
+      height: 800
+      scale: 1.0
+      fx: 642.6578369140625
+      fy: 640.84033203125
+      cx: 640.1660156250
+      cy: 403.3707275390625
+      d0: -0.05466747283935547
+      d1: 0.06333800405263901
+      d2: -0.0005165654583834112
+      d3: 0.00017864150868263096
+
+    camera_thermal:          # your Boson block, only the key is renamed
+      model: Pinhole
+      width: 640
+      height: 512
+      scale: 1.0
+      fx: 767.942728
+      fy: 767.068789
+      cx: 317.244746
+      cy: 231.644928
+      d0: -0.504042
+      d1: 0.268940
+      d2: 0.003454
+      d3: -0.000748

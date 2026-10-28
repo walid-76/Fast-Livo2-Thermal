@@ -1,31 +1,36 @@
 /**:
   ros__parameters:
     common:
-      img_topic: common:
-      img_topic: "/camera/camera/color/image_raw" 
+      img_topic: "/camera/camera/color/image_raw" # image topic for the intel d455 rgb camera
+      thermal_img_topic: "/flir_boson/image_raw"
       lid_topic: "/livox/lidar"         # LiDAR topic published by livox_ros_driver2
       imu_topic: "/livox/imu"           # IMU topic published by livox_ros_driver2
-      img_en: 1                         # 1 = enable camera | 0 = run LiDAR+IMU only (no visual)
+      img_en: 1                        # 1 = enable camera | 0 = run LiDAR+IMU only (no visual)
       lidar_en: 1                       # 1 = enable LiDAR (always keep 1)
       ros_driver_bug_fix: false         # true = apply timestamp fix for buggy Livox driver versions
                                         # keep false unless you see timestamp-related errors
 
     extrin_calib:
-      # ── Physical mounting transform between LiDAR and Camera ──────────────
-      # CRITICAL: these values are specific to HOW the sensors are physically mounted
-      # You MUST re-calibrate these with Kalibr when you mount your Flir Boson + MID-360
-      # Wrong values = map will drift and look twisted
+      # IMU -> LiDAR (MID-360 datasheet, unchanged)
+      extrinsic_T: [0.011, 0.02329, -0.04412]
+      extrinsic_R: [1., 0., 0., 0., 1., 0., 0., 0., 1.]
+
+      # LiDAR -> Camera, new 3D-printed mount (measured, not calibrated)
+      # Rcl: same orientation, so only the standard axis change (LiDAR x-fwd,y-left,z-up -> camera x-right,y-down,z-fwd)
+      Rcl: [ 0.,  -1.,   0.,
+          0.,   0.,  -1.,
+            1.,   0.,   0. ]
+            
+      # Pcl: position of the LiDAR origin, expressed in the camera frame
+      Pcl: [-0.01157, -0.05267, -0.07202]
 
 
-      extrinsic_T: [0.011, 0.02329, -0.04412]          # ← MID-360 datasheet
-      extrinsic_R: [1., 0., 0., 0., 1., 0., 0., 0., 1.] # ← MID-360 datasheet (identity)
-      
-      # first trial using the package, not 100 percent true
-      Rcl: [-0.0161635, -0.999862,  0.00378582, 
-            -0.0163135, -0.00352209, -0.999861, 
-             0.999736,  -0.016223,   -0.0162543]
+      # LiDAR -> Thermal (Boson), camera rolled 180 deg about its optical axis
+      Rcl_thermal: [ 0.,  1.,  0.,
+                     0.,  0.,  1.,
+                     1.,  0.,  0. ]
+      Pcl_thermal: [0.00083, 0.10004, -0.04695]
 
-      Pcl: [-0.015, -0.082, 0.086]
     time_offset:
       # ── Timestamp synchronization between sensors ──────────────────────────
       # If the LiDAR, IMU, and camera clocks are slightly out of sync,
@@ -43,6 +48,19 @@
       exposure_time_init: 0.0 # initial guess for camera exposure time (seconds)
                               # 0.0 = let the algorithm estimate it automatically
                               # For datasets with known exposure (e.g. AMtown = 0.0285s), set it here
+
+      thermal_img_time_offset: 0.0
+
+    visual_mode:
+
+      select: "auto"          # auto | rgb | thermal
+
+
+    shutter:
+    
+      freeze_eps: 0.02
+
+      settle_frames: 6
 
 
     preprocess:
@@ -207,7 +225,7 @@
 
     pcd_save:
       # ── Saving the 3D map to disk ───────────────────────────────────────────
-      pcd_save_en: true      # true = save final map as .pcd file when node shuts down
+      pcd_save_en: false      # true = save final map as .pcd file when node shuts down
                               # open saved file with: CloudCompare or pcl_viewer
                               # saved to: ~/thesis/src/fast_livo2/Log/PCD/
 
@@ -221,7 +239,7 @@
                               # keeps file size manageable (full res maps can be gigabytes)
                               # decrease for more detail, increase for smaller files
 
-      interval: 50           # how many LiDAR frames to save per PCD file
+      interval: -1          # how many LiDAR frames to save per PCD file
                               # -1 = save ALL frames in ONE file at the end (recommended)
                               # N  = save a new file every N frames (use for very long runs
                               #      to avoid memory crash — e.g. interval: 100)

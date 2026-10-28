@@ -22,6 +22,8 @@ which is included as part of this source code package.
 #include <geometry_msgs/msg/transform_stamped.hpp>
 #include <nav_msgs/msg/path.hpp>
 #include <vikit/camera_loader.h>
+#include "visual_mode_manager.h"
+#include "thermal_shutter_gate.h"
 
 class LIVMapper
 {
@@ -102,7 +104,6 @@ public:
   double lidar_time_offset = 0.0;
 
   bool gravity_align_en = false, gravity_align_finished = false;
-
   bool sync_jump_flag = false;
 
   bool lidar_pushed = false, imu_en, gravity_est_en, flg_reset = false, ba_bg_est_en = true;
@@ -150,6 +151,7 @@ public:
   LidarMeasureGroup LidarMeasures;
   StatesGroup _state;
   StatesGroup  state_propagat;
+  ThermalShutterGate shutter_gate_;
 
   nav_msgs::msg::Path path;
   nav_msgs::msg::Odometry odomAftMapped;
@@ -160,7 +162,7 @@ public:
   ImuProcessPtr p_imu;
   VoxelMapManagerPtr voxelmap_manager;
   VIOManagerPtr vio_manager;
-
+  VisualModeManager mode_mgr_;
   rclcpp::Publisher<visualization_msgs::msg::Marker>::SharedPtr plane_pub;
   rclcpp::Publisher<visualization_msgs::msg::MarkerArray>::SharedPtr voxel_pub;
   std::shared_ptr<rclcpp::SubscriptionBase> sub_pcl;
@@ -191,5 +193,33 @@ public:
   bool enable_image_processing = false; 
   // JPEG decoding callback function
   void jpeg_callback(const sensor_msgs::msg::CompressedImage::SharedPtr msg);
+
+
+
+  // --- callbacks / helpers (next to img_cbk) ---
+  void thermal_img_cbk(const sensor_msgs::msg::Image::ConstSharedPtr &msg_in);
+  void handleImage(const sensor_msgs::msg::Image::ConstSharedPtr &msg_in, int mod);
+  int  desiredModality() const;
+  void switchModality(int m);
+
+  // --- members ---
+  std::string thermal_img_topic;
+  rclcpp::Subscription<sensor_msgs::msg::Image>::SharedPtr sub_img_thermal;
+  double thermal_img_time_offset = 0.0;
+  std::vector<double> cameraextrinT_thermal, cameraextrinR_thermal;
+  int outlier_threshold_thermal = -1, img_point_cov_thermal = -1;
+  bool thermal_available_ = false;
+  double last_timestamp_img_mod_[2] = {-1.0, -1.0};
+  struct ImgMeta { int modality; bool vio_valid; };
+  std::deque<ImgMeta> img_meta_buffer_;      // one entry per image in img_buffer
+  int active_modality_ = 0;                  // 0 = RGB, 1 = thermal
+  int mode_switch_count_ = 0;
+  
+
+
+
+
+
+
 };
 #endif
