@@ -21,6 +21,29 @@ which is included as part of this source code package.
 
 //The Rules: Loading the parameters and math (extrinsics) that define how the sensors relate to each other.
 using namespace Sophus;
+
+struct CbCost
+{
+  const char *label;
+  double sum = 0.0, mx = 0.0;
+  int n = 0;
+  struct Scope
+  {
+    CbCost &c;
+    double t0;
+    explicit Scope(CbCost &cc) : c(cc), t0(omp_get_wtime()) {}
+    ~Scope()
+    {
+      double dt = omp_get_wtime() - t0;
+      c.sum += dt;
+      if (dt > c.mx) c.mx = dt;
+      if (++c.n % 300 == 0)
+        printf("\033[1;36m[ CB cost ] %s: avg %.3f ms  max %.3f ms  (%d calls)\033[0m\n", c.label, 1e3 * c.sum / c.n, 1e3 * c.mx, c.n);
+    }
+  };
+};
+
+
 LIVMapper::LIVMapper(rclcpp::Node::SharedPtr &node, std::string node_name, const rclcpp::NodeOptions & options)
     : node(std::make_shared<rclcpp::Node>(node_name, options)),
       extT(0, 0, 0),
@@ -53,6 +76,8 @@ LIVMapper::LIVMapper(rclcpp::Node::SharedPtr &node, std::string node_name, const
   initializeComponents(this->node);          // initialize components errors
   path.header.stamp = this->node->now();
   path.header.frame_id = "camera_init";
+
+  
 }
 
 
@@ -1227,6 +1252,9 @@ void LIVMapper::handleImage(const sensor_msgs::msg::Image::ConstSharedPtr &msg_i
     return;
   }
   if (mod == 1 && !thermal_available_) return;
+
+  static CbCost cost[2] = {{"RGB callback"}, {"THERMAL callback"}};
+  CbCost::Scope scope(cost[mod]);
 
   const double msg_header_time = stamp2Sec(msg_in->header.stamp) + (mod == 0 ? img_time_offset : thermal_img_time_offset);
   cv::Mat img_cur = getImageFromMsg(msg_in);
