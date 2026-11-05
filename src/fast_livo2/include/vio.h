@@ -22,6 +22,7 @@ which is included as part of this source code package.
 #include <vikit/robust_cost.h>
 #include <vikit/vision.h>
 #include <vikit/equidistant_camera.h>
+#include "photometric_calib.h"
 
 struct SubSparseMap
 {
@@ -209,6 +210,13 @@ public:
 
   // PointCloudXYZI::Ptr pg_down;
   // pcl::VoxelGrid<PointType> downSizeFilter;
+
+   // Photometric calibration of the thermal stream (see photometric_calib.h).
+  // calib_mode: 0 = off, 1 = fit + log only (image untouched), 2 = fit + apply.
+  // Can also be set with the env var VIO_CALIB_MODE (read in initializeVIO()).
+  PhotometricCalib calib;
+  int calib_mode = 0;
+  cv::Mat calib_raw;   // untouched copy of the current thermal frame, filled in processFrame()
 };
 typedef std::shared_ptr<VIOManager> VIOManagerPtr;
 

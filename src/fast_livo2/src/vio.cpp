@@ -47,6 +47,19 @@ which is included as part of this source code package.
 */
 
 #include "vio.h"
+#include "photometric_calib.h"
+#include <sys/stat.h>
+
+namespace
+{
+// candidates of the current frame for the photometric calibration (evaluated after the VIO update)
+struct CalibCand
+{
+  V3D pos;
+  std::vector<float> ref;
+};
+std::vector<CalibCand> g_calib_cands;
+}  // namespace
 
 using namespace Eigen;
 VIOManager::VIOManager()
@@ -244,6 +257,7 @@ void VIOManager::activateSlot(int m)
   has_ref_patch_cache = false;
 
   active_slot = m;
+  calib.reset();  // photometric calibration belongs to the map of the active camera
 }
 
 
@@ -257,6 +271,14 @@ void VIOManager::activateSlot(int m)
 void VIOManager::initializeVIO()
 {
   visual_submap = new SubSparseMap;
+
+  // photometric calibration switches (thermal camera only), see photometric_calib.h
+  if (const char *e = std::getenv("VIO_CALIB_MODE")) calib_mode = std::atoi(e);
+  if (const char *e = std::getenv("VIO_CALIB_LAMBDA1")) calib.p.lambda1 = std::atof(e);
+  if (const char *e = std::getenv("VIO_CALIB_HUBER")) calib.p.huber_delta = std::atof(e);
+  if (const char *e = std::getenv("VIO_CALIB_NCC")) calib.p.ncc_thre = std::atof(e);
+  if (const char *e = std::getenv("VIO_CALIB_MIN_SAMPLES")) calib.p.min_samples = std::atoi(e);
+  printf("[ VIO ] photometric calibration mode: %d (lambda1 %.3f, huber %.3f, ncc %.2f, min_samples %d)\n", calib_mode, calib.p.lambda1, calib.p.huber_delta, calib.p.ncc_thre, calib.p.min_samples);
 
   // grid_size / grid_n_height as configured: they are interpreted separately for every camera
   grid_size_cfg = grid_size;
@@ -605,6 +627,10 @@ void VIOManager::retrieveFromVisualSparseMap(cv::Mat img,
   if (feat_map.size() <= 0) return;
   double ts0 = omp_get_wtime();
 
+  // photometric calibration only runs for the thermal camera (slot 1) and when processFrame() prepared calib_raw
+  const bool calib_active = (calib_mode > 0 && active_slot == 1 && !calib_raw.empty());
+  if (calib_active) calib.n_pg = (int)pg.size();
+
   visual_submap->reset();
   sub_feat_map.clear();
 
@@ -740,6 +766,12 @@ void VIOManager::retrieveFromVisualSparseMap(cv::Mat img,
     }
   }
 
+  if (calib_active)
+  {
+    int nv = 0;
+    for (int i = 0; i < length; i++) if (grid_num[i] == TYPE_MAP) nv++;
+    calib.n_vis = nv;
+  }
   for (auto &key : DeleteKeyList) { sub_feat_map.erase(key); }
 
   // ── Step 4: Process each visible map point ──────────────────────────────────
@@ -873,6 +905,29 @@ void VIOManager::retrieveFromVisualSparseMap(cv::Mat img,
     {
       error += (ref_ftr->inv_expo_time_ * patch_wrap[ind] - state->inv_expo_time * patch_buffer[ind])
              * (ref_ftr->inv_expo_time_ * patch_wrap[ind] - state->inv_expo_time * patch_buffer[ind]);
+    }
+
+    // ── Photometric calibration: remember this candidate (thermal only) ─────────────────────────────
+    // The pair (warped reference patch, raw current patch) is evaluated LATER, after the VIO update, with the refined pose:
+    // here (before the VIO update) the pose is only the LiDAR/IMU prediction and can be several pixels off, so the patches
+    // are often not the same spot. pre-update NCC is only counted for the log.
+    if (calib_active)
+    {
+      calib.n_cand++;
+      int zeros = 0;
+      for (int ind = 0; ind < patch_size_total; ind++)
+        if (patch_wrap[ind] == 0.0f) zeros++;
+      if (zeros > calib.p.max_zero_frac * patch_size_total)
+        calib.n_rej_zero++;
+      else
+      {
+        calib.ncc_pre_sum += calculateNCC(patch_wrap.data(), patch_buffer.data(), patch_size_total);
+        calib.n_pre++;
+        CalibCand cd;
+        cd.pos = pt->pos_;
+        cd.ref.assign(patch_wrap.begin(), patch_wrap.begin() + patch_size_total);
+        g_calib_cands.push_back(std::move(cd));
+      }
     }
 
     // ── Step 4f: NCC check (optional additional filter) ──────────────────────
@@ -2139,6 +2194,36 @@ void VIOManager::processFrame(cv::Mat &img, vector<pointWithVar> &pg, const unor
 
   if (img.channels() == 3) cv::cvtColor(img, img, CV_BGR2GRAY);
 
+  // ── Photometric calibration, stage A: apply the PREVIOUS frame's (g,b) ──────────────────────────────
+  // The image buffer is modified in place (cv::LUT writes into the existing buffer), so Frame, the stored reference
+  // features (ftr->img_) and the patches all see the calibrated image: every stored patch lives in one photometric frame.
+  // calib_raw keeps the untouched image for the sample collection and for stage B (calibrate once from raw, no cascading).
+  const bool calib_active = (calib_mode > 0 && active_slot == 1 && img.type() == CV_8UC1);
+  calib_raw = cv::Mat();
+  if (calib_active)
+  {
+    if (!calib.logTried()) calib.openLog(string(ROOT_DIR) + "Log/photometric_calib.csv");
+    calib_raw = img.clone();
+    calib.clearSamples();
+    g_calib_cands.clear();
+    {
+      cv::Scalar mu, sd;
+      cv::meanStdDev(calib_raw, mu, sd);
+      calib.img_mean = mu[0];
+      calib.img_std = sd[0];
+    }
+    if (calib_mode == 2)
+    {
+      uint8_t lut_arr[256];
+      PhotometricCalib::buildLUT(lut_arr, calib.g, calib.b);
+      cv::Mat lut(1, 256, CV_8UC1, lut_arr);
+      cv::LUT(calib_raw, lut, img);
+      // Visual check: the VIO debug image / map colours become the calibrated image
+      if (img_cp.channels() == 3) cv::cvtColor(img, img_cp, CV_GRAY2BGR);
+      else img.copyTo(img_cp);
+    }
+  }
+
   new_frame_.reset(new Frame(cam, img));
   updateFrameState(*state);
   
@@ -2148,9 +2233,131 @@ void VIOManager::processFrame(cv::Mat &img, vector<pointWithVar> &pg, const unor
 
   retrieveFromVisualSparseMap(img, pg, feat_map);
 
+  // ── Thermal map colouring (display only; VIO keeps using the gray image) ───────────────────────────
+  // VIO_THERMAL_COLORMAP = turbo | inferno | plasma | magma | viridis | hot | jet   (unset = keep gray)
+  // OpenCV ids used as numbers so this also builds with older OpenCV headers: JET 2, HOT 11, MAGMA 13, INFERNO 14, PLASMA 15, VIRIDIS 16, TURBO 20
+  {
+    static const int cmap = []() {
+      const char *e = std::getenv("VIO_THERMAL_COLORMAP");
+      if (!e) return -1;
+      const std::string n(e);
+      if (n == "turbo") return 20;
+      if (n == "inferno") return 14;
+      if (n == "plasma") return 15;
+      if (n == "magma") return 13;
+      if (n == "viridis") return 16;
+      if (n == "hot") return 11;
+      if (n == "jet") return 2;
+      return -1;
+    }();
+    if (cmap >= 0 && active_slot == 1 && img.type() == CV_8UC1)
+    {
+      cv::Mat colored;
+      cv::applyColorMap(img, colored, cmap);
+      colored.copyTo(img_cp);   // used for the map colours and the debug image
+      colored.copyTo(img_rgb);
+    }
+  }
+
   double t2 = omp_get_wtime();
 
+  const V3D calib_p0 = state->pos_end;   // pose after LIO, before the VIO update
+  const M3D calib_R0 = state->rot_end;
   computeJacobianAndUpdateEKF(img);
+  if (calib_active)
+  {
+    calib.d_pos_mm = (state->pos_end - calib_p0).norm() * 1000.0;
+    calib.d_rot_deg = Eigen::AngleAxisd(calib_R0.transpose() * state->rot_end).angle() * 57.29578;
+  }
+
+  // ── Photometric calibration, stage C: samples with the pose AFTER the VIO update ─────────────────────
+  // Pair = (mean of the stored warped reference patch, mean of the RAW current patch at the re-projected pixel).
+  // NCC is invariant to gain/bias, so it checks the geometry independently of the photometry.
+  // The fitted (g,b) are applied to the NEXT frame (stage A).
+  if (calib_active)
+  {
+    std::vector<float> raw_patch(patch_size_total);
+    for (const CalibCand &cd : g_calib_cands)
+    {
+      V3D dir(new_frame_->T_f_w_ * cd.pos);
+      V2D pc(new_frame_->w2c(cd.pos));
+      if (dir[2] <= 0 || !new_frame_->cam_->isInFrame(pc.cast<int>(), border)) continue;
+      getImagePatch(calib_raw, pc, raw_patch.data(), 0);
+      const double ncc_c = calculateNCC(const_cast<float *>(cd.ref.data()), raw_patch.data(), patch_size_total);
+      calib.ncc_sum += ncc_c;
+      calib.n_post++;
+      // Diagnostic (first 30 candidates): best NCC within +-VIO_CALIB_SEARCH_R px (default 6, step VIO_CALIB_SEARCH_STEP) of the projection and the offset where it is found.
+      // High best-NCC at a consistent non-zero offset = geometric misalignment; low everywhere = the patches do not match at all.
+      if (calib.n_best < 30)
+      {
+        double best = -2.0;
+        int bdx = 0, bdy = 0;
+        std::vector<float> sp(patch_size_total);
+        static const int sr = []() { const char *e = std::getenv("VIO_CALIB_SEARCH_R"); return e ? std::max(1, std::atoi(e)) : 6; }();
+        static const int ss = []() { const char *e = std::getenv("VIO_CALIB_SEARCH_STEP"); return e ? std::max(1, std::atoi(e)) : 1; }();
+        for (int dy = -sr; dy <= sr; dy += ss)
+          for (int dx = -sr; dx <= sr; dx += ss)
+          {
+            V2D pc2(pc[0] + dx, pc[1] + dy);
+            if (!new_frame_->cam_->isInFrame(pc2.cast<int>(), border)) continue;
+            getImagePatch(calib_raw, pc2, sp.data(), 0);
+            const double n2 = calculateNCC(const_cast<float *>(cd.ref.data()), sp.data(), patch_size_total);
+            if (n2 > best) { best = n2; bdx = dx; bdy = dy; }
+          }
+        if (best > -2.0)
+        {
+          calib.n_best++;
+          calib.ncc_best_sum += best;
+          calib.dx_sum += bdx;
+          calib.dy_sum += bdy;
+          calib.adx_sum += std::abs(bdx);
+          calib.ady_sum += std::abs(bdy);
+        }
+      }
+      if (ncc_c < calib.p.ncc_thre)
+      {
+        calib.n_rej_ncc++;
+        continue;
+      }
+      double ref_sum = 0.0, raw_sum = 0.0;
+      for (int ind = 0; ind < patch_size_total; ind++)
+      {
+        ref_sum += cd.ref[ind];
+        raw_sum += raw_patch[ind];
+      }
+      calib.addSample(ref_sum / patch_size_total, raw_sum / patch_size_total);
+    }
+    const bool updated = calib.solve();
+    calib.logFrame(new_frame_->id_, img_time, state->inv_expo_time, updated);
+    if (new_frame_->id_ % 30 == 0)
+      printf("[ VIO ] calib: pg %d  vis %d  cand %d  rej_zero %d  rej_ncc %d  used %d  ncc_pre %.2f  ncc_post %.2f  g %.3f  b %.2f\n", calib.n_pg,
+             calib.n_vis, calib.n_cand, calib.n_rej_zero, calib.n_rej_ncc, calib.n_used, calib.n_pre ? calib.ncc_pre_sum / calib.n_pre : -1.0,
+             calib.n_post ? calib.ncc_sum / calib.n_post : -1.0, calib.g, calib.b);
+
+    // Visual check: every N frames save [ raw | calibrated ] side by side (also in mode 1: shows what the fit WOULD do).
+    // Enable with VIO_CALIB_SAVE_EVERY=N, files go to Log/photometric_calib_frames/ (created if the Log/ folder exists).
+    static const int save_every = []() {
+      const char *e = std::getenv("VIO_CALIB_SAVE_EVERY");
+      return e ? std::atoi(e) : 0;
+    }();
+    if (save_every > 0 && new_frame_->id_ % save_every == 0)
+    {
+      const std::string dir = string(ROOT_DIR) + "Log/photometric_calib_frames/";
+      mkdir(dir.c_str(), 0755);  // ignore "already exists"
+      uint8_t lut_arr[256];
+      PhotometricCalib::buildLUT(lut_arr, calib.g, calib.b);
+      cv::Mat lut(1, 256, CV_8UC1, lut_arr);
+      cv::Mat calibrated;
+      cv::LUT(calib_raw, lut, calibrated);
+      cv::Mat side;
+      cv::hconcat(calib_raw, calibrated, side);
+      char txt[128];
+      snprintf(txt, sizeof(txt), "g=%.3f b=%.2f n=%d cand=%d ncc_post=%.2f", calib.g, calib.b, calib.n_used, calib.n_cand,
+               calib.n_post ? calib.ncc_sum / calib.n_post : -1.0);
+      cv::putText(side, txt, cv::Point(calib_raw.cols + 8, 20), cv::FONT_HERSHEY_SIMPLEX, 0.5, cv::Scalar(255), 1);
+      cv::imwrite(dir + std::to_string(new_frame_->id_) + ".png", side);
+    }
+  }
 
   double t3 = omp_get_wtime();
 
